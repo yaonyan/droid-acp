@@ -8,7 +8,7 @@ This agent bridges the ACP protocol with Factory Droid, allowing ACP clients (li
 
 ```bash
 # From npm (after published)
-npm install -g droid-acp
+npm install -g @yaonyan/droid-acp
 
 # From source
 git clone <repo>
