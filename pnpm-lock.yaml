@@ -18,6 +18,9 @@ importers:
       bumpp:
         specifier: ^10.3.2
         version: 10.3.2
+      dotenv:
+        specifier: ^17.2.3
+        version: 17.2.3
       tsdown:
         specifier: ^0.17.0
         version: 0.17.2(typescript@5.9.3)

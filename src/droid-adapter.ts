@@ -1,58 +1,144 @@
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
-import { log, generateId } from "./utils.js";
-import type {
-  DroidEvent,
-  DroidInput,
-  AutonumyLevel,
-} from "./types.js";
+import { randomUUID } from "node:crypto";
+import { log } from "./utils.js";
+import type { AutonomyLevel } from "./types.js";
 
 export interface DroidAdapterOptions {
   cwd: string;
-  autoLevel?: AutonumyLevel;
-  model?: string;
 }
 
 export interface DroidAdapter {
-  /** Start the droid process */
-  start(): Promise<DroidEvent>;
-  /** Send a user message */
+  start(): Promise<DroidInitResult>;
   sendMessage(text: string): void;
-  /** Set autonomy mode */
-  setMode(level: AutonumyLevel): void;
-  /** Listen for events */
-  onEvent(handler: (event: DroidEvent) => void): void;
-  /** Stop the droid process */
+  setMode(level: AutonomyLevel): void;
+  onNotification(handler: (notification: DroidNotification) => void): void;
   stop(): Promise<void>;
-  /** Check if process is running */
   isRunning(): boolean;
 }
 
+export interface DroidInitResult {
+  sessionId: string;
+  modelId: string;
+  availableModels: Array<{ id: string; displayName: string }>;
+}
+
+// Droid notification types
+export type DroidNotification =
+  | { type: "working_state"; state: "idle" | "streaming_assistant_message" }
+  | { type: "message"; role: "user" | "assistant" | "system"; text: string; id: string }
+  | { type: "error"; message: string }
+  | { type: "complete" };
+
 /**
- * Create a Droid adapter that manages a `droid exec --stream-jsonrpc` subprocess
+ * Factory API message format
+ * 
+ * NOTE: Droid CLI documentation for `stream-jsonrpc` format is outdated/inaccurate.
+ * As of Droid v0.36.1, it uses the Factory API format (factoryApiVersion: "1.0.0")
+ * via `droid.initialize_session`, `droid.session_notification` etc., instead of
+ * the simplified JSON-RPC format described in the docs.
+ */
+interface FactoryRequest {
+  jsonrpc: "2.0";
+  factoryApiVersion: "1.0.0";
+  type: "request";
+  method: string;
+  params: Record<string, unknown>;
+  id: string;
+}
+
+/**
+ * Create a Droid adapter using Factory API format
  */
 export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
   let process: ChildProcess | null = null;
-  let eventHandlers: Array<(event: DroidEvent) => void> = [];
-  let initPromise: {
-    resolve: (event: DroidEvent) => void;
-    reject: (error: Error) => void;
-  } | null = null;
+  let sessionId: string | null = null;
+  const machineId = randomUUID();
+  const notificationHandlers: Array<(n: DroidNotification) => void> = [];
+  let initResolve: ((result: DroidInitResult) => void) | null = null;
+  let initReject: ((error: Error) => void) | null = null;
 
-  const emitEvent = (event: DroidEvent) => {
-    eventHandlers.forEach((handler) => handler(event));
+  const send = (method: string, params: Record<string, unknown>) => {
+    if (!process?.stdin?.writable) return;
+    const msg: FactoryRequest = {
+      jsonrpc: "2.0",
+      factoryApiVersion: "1.0.0",
+      type: "request",
+      method,
+      params,
+      id: randomUUID(),
+    };
+    process.stdin.write(JSON.stringify(msg) + "\n");
+    log("Sent:", method);
   };
 
-  const sendToProcess = (input: DroidInput) => {
-    if (process?.stdin?.writable) {
-      const line = JSON.stringify(input) + "\n";
-      process.stdin.write(line);
-      log("Sent to droid:", input);
+  const emit = (n: DroidNotification) => {
+    notificationHandlers.forEach((h) => h(n));
+  };
+
+  const handleLine = (line: string) => {
+    try {
+      const msg = JSON.parse(line);
+      
+      // Handle init response
+      if (msg.type === "response" && msg.result?.sessionId && initResolve) {
+        const r = msg.result;
+        sessionId = r.sessionId;
+        initResolve({
+          sessionId: r.sessionId,
+          modelId: r.settings?.modelId || "unknown",
+          availableModels: r.availableModels || [],
+        });
+        initResolve = null;
+        initReject = null;
+        return;
+      }
+
+      // Handle error response
+      if (msg.type === "response" && msg.error && initReject) {
+        initReject(new Error(msg.error.message));
+        initResolve = null;
+        initReject = null;
+        return;
+      }
+
+      // Handle notifications
+      if (msg.type === "notification" && msg.method === "droid.session_notification") {
+        const n = msg.params?.notification;
+        if (!n) return;
+
+        switch (n.type) {
+          case "droid_working_state_changed":
+            emit({ type: "working_state", state: n.newState });
+            if (n.newState === "idle") {
+              emit({ type: "complete" });
+            }
+            break;
+
+          case "create_message":
+            const content = n.message?.content?.[0];
+            if (content?.type === "text") {
+              emit({
+                type: "message",
+                role: n.message.role,
+                text: content.text,
+                id: n.message.id,
+              });
+            }
+            break;
+
+          case "error":
+            emit({ type: "error", message: n.message });
+            break;
+        }
+      }
+    } catch (err) {
+      log("Parse error:", (err as Error).message);
     }
   };
 
   return {
-    async start(): Promise<DroidEvent> {
+    async start(): Promise<DroidInitResult> {
       const args = [
         "exec",
         "--input-format", "stream-jsonrpc",
@@ -60,122 +146,64 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
         "--cwd", options.cwd,
       ];
 
-      if (options.autoLevel) {
-        args.push("--auto", options.autoLevel);
-      }
-
-      if (options.model) {
-        args.push("--model", options.model);
-      }
-
-      log("Starting droid with args:", args);
-
+      log("Starting droid:", args);
       process = spawn("droid", args, {
         stdio: ["pipe", "pipe", "pipe"],
         env: globalThis.process.env,
       });
 
-      // Handle stderr for logging
-      if (process.stderr) {
-        const stderrReader = createInterface({ input: process.stderr });
-        stderrReader.on("line", (line) => {
-          log("[droid stderr]", line);
-        });
-      }
-
-      // Handle stdout for JSON events
       if (process.stdout) {
-        const stdoutReader = createInterface({ input: process.stdout });
-        stdoutReader.on("line", (line) => {
-          try {
-            const event = JSON.parse(line) as DroidEvent;
-            log("Received from droid:", event.type);
-
-            // Resolve init promise if waiting
-            if (event.type === "system" && event.subtype === "init" && initPromise) {
-              initPromise.resolve(event);
-              initPromise = null;
-            }
-
-            emitEvent(event);
-          } catch (err) {
-            log("Failed to parse droid output:", line, err);
-          }
-        });
+        createInterface({ input: process.stdout }).on("line", handleLine);
+      }
+      if (process.stderr) {
+        createInterface({ input: process.stderr }).on("line", (l) => log("[droid]", l));
       }
 
-      // Handle process exit
-      process.on("exit", (code, signal) => {
-        log("Droid process exited with code:", code, "signal:", signal);
+      process.on("error", (err) => {
+        if (initReject) initReject(err);
+      });
+      process.on("exit", (code) => {
+        log("Droid exit:", code);
         process = null;
       });
 
-      process.on("error", (err) => {
-        log("Droid process error:", err);
-        if (initPromise) {
-          initPromise.reject(err);
-          initPromise = null;
-        }
-      });
-
-      // Wait for init event
       return new Promise((resolve, reject) => {
-        initPromise = { resolve, reject };
-        
-        // Timeout after 30 seconds
+        initResolve = resolve;
+        initReject = reject;
+        send("droid.initialize_session", { machineId, cwd: options.cwd });
         setTimeout(() => {
-          if (initPromise) {
-            initPromise.reject(new Error("Droid init timeout"));
-            initPromise = null;
+          if (initReject) {
+            initReject(new Error("Droid init timeout"));
+            initResolve = null;
+            initReject = null;
           }
         }, 30000);
       });
     },
 
     sendMessage(text: string) {
-      sendToProcess({
-        jsonrpc: "2.0",
-        method: "message",
-        params: {
-          role: "user",
-          text,
-        },
-        id: generateId(),
+      if (!sessionId) return;
+      send("droid.add_user_message", { sessionId, text });
+    },
+
+    setMode(level: AutonomyLevel) {
+      if (!sessionId) return;
+      send("droid.update_session_settings", {
+        sessionId,
+        settings: { autonomyLevel: level },
       });
     },
 
-    setMode(level: AutonumyLevel) {
-      sendToProcess({
-        jsonrpc: "2.0",
-        method: "set_mode",
-        params: {
-          mode: level,
-        },
-        id: generateId(),
-      });
-    },
-
-    onEvent(handler: (event: DroidEvent) => void) {
-      eventHandlers.push(handler);
+    onNotification(handler) {
+      notificationHandlers.push(handler);
     },
 
     async stop() {
       if (process) {
         process.stdin?.end();
         process.kill("SIGTERM");
-        
-        // Wait for process to exit
-        await new Promise<void>((resolve) => {
-          if (process) {
-            process.on("exit", () => resolve());
-          } else {
-            resolve();
-          }
-        });
-        
         process = null;
       }
-      eventHandlers = [];
     },
 
     isRunning() {

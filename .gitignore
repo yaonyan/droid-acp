@@ -1,4 +1,35 @@
+# Dependencies
 node_modules
+.pnpm-store
+
+# Distribution
 dist
-*.log
+coverage
+
+# Environment variables
+.env
+.env.*
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs
+*.njsproj
+*.sln
+*.sw?
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Test artifacts
+tests/test-*.mjs
