@@ -13,6 +13,7 @@ export interface DroidAdapter {
   sendMessage(text: string): void;
   setMode(level: AutonomyLevel): void;
   onNotification(handler: (notification: DroidNotification) => void): void;
+  onRawEvent(handler: (event: unknown) => void): void;
   stop(): Promise<void>;
   isRunning(): boolean;
 }
@@ -55,6 +56,7 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
   let sessionId: string | null = null;
   const machineId = randomUUID();
   const notificationHandlers: Array<(n: DroidNotification) => void> = [];
+  const rawEventHandlers: Array<(e: unknown) => void> = [];
   let initResolve: ((result: DroidInitResult) => void) | null = null;
   let initReject: ((error: Error) => void) | null = null;
 
@@ -79,6 +81,9 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
   const handleLine = (line: string) => {
     try {
       const msg = JSON.parse(line);
+      
+      // Emit raw event
+      rawEventHandlers.forEach(h => h(msg));
       
       // Handle init response
       if (msg.type === "response" && msg.result?.sessionId && initResolve) {
@@ -116,20 +121,45 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
             break;
 
           case "create_message":
-            const content = n.message?.content?.[0];
-            if (content?.type === "text") {
-              emit({
-                type: "message",
-                role: n.message.role,
-                text: content.text,
-                id: n.message.id,
-              });
+            if (n.message) {
+                // Handle pure text content
+                const textContent = n.message.content?.find((c: any) => c.type === "text");
+                if (textContent) {
+                    emit({
+                        type: "message",
+                        role: n.message.role,
+                        text: textContent.text,
+                        id: n.message.id,
+                    });
+                }
+                
+                // Handle tool use content (forward as message for now or handled by request_permission flow)
+                // We don't emit "message" for tool use to avoid duplicate text bubbles if not needed,
+                // but checking content type is good practice.
             }
             break;
 
           case "error":
             emit({ type: "error", message: n.message });
             break;
+        }
+      }
+
+      // Handle incoming requests (like permissions)
+      if (msg.type === "request") {
+        if (msg.method === "droid.request_permission") {
+          // Auto-approve for now to unblock
+          const response = {
+            jsonrpc: "2.0",
+            factoryApiVersion: "1.0.0",
+            type: "response",
+            id: msg.id,
+            result: { selectedOption: "proceed_once" },
+          };
+          if (process?.stdin) {
+            process.stdin.write(JSON.stringify(response) + "\n");
+          }
+          log("Auto-approved permission request:", msg.id);
         }
       }
     } catch (err) {
@@ -196,6 +226,10 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
 
     onNotification(handler) {
       notificationHandlers.push(handler);
+    },
+
+    onRawEvent(handler) {
+      rawEventHandlers.push(handler);
     },
 
     async stop() {

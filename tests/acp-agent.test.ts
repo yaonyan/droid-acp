@@ -7,6 +7,7 @@ const mockDroidAdapter = {
   sendMessage: vi.fn(),
   setMode: vi.fn(),
   onNotification: vi.fn(),
+  onRawEvent: vi.fn(),
   stop: vi.fn(),
   isRunning: vi.fn(),
 };

@@ -91,6 +91,22 @@ export class DroidAcpAgent implements Agent {
     // Set up notification handler
     droid.onNotification((n) => this.handleNotification(session, n));
 
+    // Forward raw events for debugging (enable with DROID_DEBUG=1)
+    if (process.env.DROID_DEBUG) {
+      droid.onRawEvent(async (event) => {
+        await this.client.sessionUpdate({
+          sessionId: session.id,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: {
+              type: "text",
+              text: `\n\`\`\`json\n${JSON.stringify(event, null, 2)}\n\`\`\`\n`,
+            },
+          },
+        });
+      });
+    }
+
     this.sessions.set(sessionId, session);
     log("Session created:", sessionId);
 
@@ -106,9 +122,9 @@ export class DroidAcpAgent implements Agent {
       modes: {
         currentModeId: "medium",
         availableModes: [
-          { id: "low", name: "Suggest", description: "Suggest mode" },
-          { id: "medium", name: "Normal", description: "Normal mode" },
-          { id: "high", name: "Full", description: "Full autonomy" },
+          { id: "low", name: "Suggest", description: "Low - Safe file operations, requires confirmation" },
+          { id: "medium", name: "Normal", description: "Medium - Development tasks with moderate autonomy" },
+          { id: "high", name: "Full", description: "High - Production operations with full autonomy" },
         ],
       },
     };
