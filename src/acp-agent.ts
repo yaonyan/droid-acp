@@ -16,14 +16,17 @@ import {
 import { createDroidAdapter, type DroidAdapter, type DroidInitResult, type DroidNotification } from "./droid-adapter.js";
 import { log, generateId } from "./utils.js";
 import { ACP_TO_DROID_MODE, type AutonomyLevel } from "./types.js";
-
 interface Session {
   id: string;
   droid: DroidAdapter;
   droidSessionId: string;
   model: string;
+  mode: string; // ACP mode: "low", "medium", "high"
   cancelled: boolean;
   promptResolve: ((result: PromptResponse) => void) | null;
+  activeToolCallIds: Set<string>;
+  toolCallStatus: Map<string, "pending" | "in_progress" | "completed">;
+  toolNames: Map<string, string>;
 }
 
 /**
@@ -84,8 +87,12 @@ export class DroidAcpAgent implements Agent {
       droid,
       droidSessionId: initResult.sessionId,
       model: initResult.modelId,
+      mode: "medium", // Default to medium mode
       cancelled: false,
       promptResolve: null,
+      activeToolCallIds: new Set(),
+      toolCallStatus: new Map(),
+      toolNames: new Map(),
     };
 
     // Set up notification handler
@@ -106,6 +113,14 @@ export class DroidAcpAgent implements Agent {
         });
       });
     }
+    
+    // Handle permissions requests
+    droid.onRequest(async (method, params) => {
+        if (method === "droid.request_permission") {
+            return this.handlePermission(session, params);
+        }
+        throw new Error("Method not supported");
+    });
 
     this.sessions.set(sessionId, session);
     log("Session created:", sessionId);
@@ -183,11 +198,72 @@ export class DroidAcpAgent implements Agent {
     const session = this.sessions.get(request.sessionId);
     if (session) {
       log("setSessionMode:", request.modeId);
+      session.mode = request.modeId; // Update session mode
       const droidMode = ACP_TO_DROID_MODE[request.modeId] as AutonomyLevel;
       if (droidMode) {
         session.droid.setMode(droidMode);
       }
     }
+  }
+
+  private async handlePermission(session: Session, params: any): Promise<any> {
+    const toolUse = params.toolUses?.[0]?.toolUse;
+    if (!toolUse) {
+         return { selectedOption: "proceed_once" }; // Default fallback
+    }
+
+    const toolCallId = toolUse.id;
+    const toolName = toolUse.name;
+    const command = toolUse.input?.command || JSON.stringify(toolUse.input);
+    const riskLevel = toolUse.input?.riskLevel || "medium"; // low, medium, high
+
+    log("Permission request for tool:", toolCallId, "risk:", riskLevel, "mode:", session.mode);
+
+    // 1. Emit tool_call (pending)
+    session.activeToolCallIds.add(toolCallId);
+    session.toolNames.set(toolCallId, toolName);
+    session.toolCallStatus.set(toolCallId, "pending");
+    await this.client.sessionUpdate({
+        sessionId: session.id,
+        update: {
+            sessionUpdate: "tool_call",
+            toolCallId: toolCallId,
+            kind: "execute",
+            title: `Running ${toolName}: ${command}`,
+            status: "pending",
+        }
+    });
+
+    // 2. Auto-approve/reject based on session mode and risk level
+    let decision: "proceed_once" | "proceed_always" | "cancel";
+    
+    if (session.mode === "high") {
+      // High mode: auto-approve everything
+      decision = "proceed_always";
+      log("Auto-approved (high mode)");
+    } else if (session.mode === "medium") {
+      // Medium mode: approve low/medium risk, reject high risk
+      if (riskLevel === "low" || riskLevel === "medium") {
+        decision = "proceed_once";
+        log("Auto-approved (medium mode, low/med risk)");
+      } else {
+        decision = "cancel";
+        log("Auto-rejected (medium mode, high risk)");
+      }
+    } else {
+      // Low mode: reject everything
+      decision = "cancel";
+      log("Auto-rejected (low mode)");
+    }
+
+    // Update status based on decision
+    if (decision === "cancel") {
+      session.toolCallStatus.set(toolCallId, "completed");
+    } else {
+      session.toolCallStatus.set(toolCallId, "in_progress");
+    }
+
+    return { selectedOption: decision };
   }
 
   private async handleNotification(session: Session, n: DroidNotification) {
@@ -196,15 +272,94 @@ export class DroidAcpAgent implements Agent {
     switch (n.type) {
       case "message":
         if (n.role === "assistant") {
-          // Send assistant message as ACP sessionUpdate
-          await this.client.sessionUpdate({
+          // Handle tool use in message
+          if (n.toolUse) {
+             const toolCallId = n.toolUse.id;
+             if (!session.activeToolCallIds.has(toolCallId)) {
+                 session.activeToolCallIds.add(toolCallId);
+                 session.toolNames.set(toolCallId, n.toolUse.name);
+                 session.toolCallStatus.set(toolCallId, "in_progress"); // Assume started if we see it late without permission req
+                 await this.client.sessionUpdate({
+                    sessionId: session.id,
+                    update: {
+                        sessionUpdate: "tool_call",
+                        toolCallId: toolCallId,
+                        kind: "execute",
+                        title: `Running ${n.toolUse.name}`,
+                        status: "in_progress",
+                    }
+                 });
+             } else {
+                 // Update status to in_progress if it was pending
+                 const status = session.toolCallStatus.get(toolCallId);
+                 if (status !== "completed") {
+                     session.toolCallStatus.set(toolCallId, "in_progress");
+                     await this.client.sessionUpdate({
+                        sessionId: session.id,
+                        update: {
+                            sessionUpdate: "tool_call_update",
+                            toolCallId: toolCallId,
+                            status: "in_progress",
+                        }
+                     });
+                 }
+             }
+          }
+
+          // Handle text content
+          if (n.text) {
+             await this.client.sessionUpdate({
+               sessionId: session.id,
+               update: {
+                 sessionUpdate: "agent_message_chunk",
+                 content: { type: "text", text: n.text },
+               },
+             });
+          }
+        }
+        break;
+
+      case "tool_result":
+        // First, send the tool response content
+        // TODO: This might be a temporary fix. 
+        await this.client.sessionUpdate({
             sessionId: session.id,
             update: {
-              sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: n.text },
-            },
-          });
-        }
+                sessionUpdate: "tool_call_update",
+                toolCallId: n.toolUseId,
+                content: [
+                    {
+                        type: "content",
+                        content: {
+                            type: "text",
+                            text: n.content
+                        }
+                    }
+                ],
+                _meta: {
+                    claudeCode: {
+                        toolName: session.toolNames.get(n.toolUseId) || "unknown",
+                        toolResponse: [
+                            {
+                                type: "text",
+                                text: n.content
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+        
+        // Then, send the completion status separately
+        session.toolCallStatus.set(n.toolUseId, "completed");
+        await this.client.sessionUpdate({
+            sessionId: session.id,
+            update: {
+                sessionUpdate: "tool_call_update",
+                toolCallId: n.toolUseId,
+                status: "completed"
+            }
+        });
         break;
 
       case "error":

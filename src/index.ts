@@ -6,7 +6,6 @@
  * This agent bridges the ACP protocol with Factory Droid CLI,
  * allowing ACP clients (like Zed) to use Droid as their AI backend.
  */
-
 // Redirect all console output to stderr (stdout is reserved for ACP protocol)
 const _originalLog = console.log;
 console.log = console.error;

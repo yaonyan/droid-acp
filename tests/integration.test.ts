@@ -44,6 +44,19 @@ describe('Droid ACP Agent Integration', () => {
            }
         }
         
+        // Handle "session/requestPermission" request from Agent
+        if (msg.method === 'session/requestPermission') {
+            console.log('[AGENT_REQ] Permission Request:', JSON.stringify(msg.params));
+            // Auto-approve
+            const response = {
+                jsonrpc: "2.0",
+                id: msg.id,
+                result: { outcome: { outcome: "selected", optionId: "allow_once" } }
+            };
+            agent.stdin!.write(JSON.stringify(response) + '\n');
+            return;
+        }
+        
         if (msg.id && msgHandlers.has(msg.id)) {
           msgHandlers.get(msg.id)!(msg);
           msgHandlers.delete(msg.id);
