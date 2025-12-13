@@ -34,18 +34,15 @@ export FACTORY_API_KEY=fk-...
 
 ### With Zed Editor
 
-Add to your Zed settings (`settings.json`):
+Add to your Zed settings:
 
-```jsonc
+```json
 {
-  "agent-servers": {
-    "droid-acp": {
-      "type": "custom",
-      "command": "npx",
-      "args": ["@yaonyan/droid-acp"],
+  "agents": {
+    "droid": {
+      "command": "droid-acp",
       "env": {
-        "FACTORY_API_KEY": "fk-xxx"
-        // "DROID_DEBUG": "1"
+        "FACTORY_API_KEY": "fk-..."
       }
     }
   }
@@ -61,7 +58,7 @@ node dist/index.mjs
 
 ## Features
 
-- **Multi-model support**: Claude Opus/Sonnet/Haiku, GPT-5.1, Gemini 3 Pro
+el support**: Claude Opus/Sonnet/Haiku, GPT-5.1, Gemini 3 Pro
 - **Autonomy levels**: Low (read-only), Medium (dev ops), High (production ops)
 - **Session management**: Persistent sessions with conversation history
 - **Tool execution**: File operations, command execution, code search
@@ -75,10 +72,10 @@ node dist/index.mjs
 └──────────────┘                 └────────┬────────┘
                                           │ spawn
                                           ▼
-                                 ┌─────────────────┐
-                                 │  droid exec     │
+                                 ┌──────────────────┐
+                                 │  droid exec      │
                                  │  --stream-jsonrpc│
-                                 └─────────────────┘
+                                 └──────────────────┘
 ```
 
 ## Development
