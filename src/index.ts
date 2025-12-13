@@ -38,11 +38,28 @@ function main() {
     nodeToWebReadable(process.stdin)
   );
 
-  // Create ACP connection
+  // Create ACP connection and track agent for cleanup
+  let agent: DroidAcpAgent | null = null;
   new AgentSideConnection(
-    (client: AgentSideConnection) => new DroidAcpAgent(client),
+    (client: AgentSideConnection) => {
+      agent = new DroidAcpAgent(client);
+      return agent;
+    },
     stream
   );
+
+  // Cleanup on process exit
+  const cleanup = async () => {
+    log("Process exiting, cleaning up...");
+    if (agent) {
+      await agent.cleanup();
+    }
+    process.exit(0);
+  };
+
+  process.on("SIGTERM", cleanup);
+  process.on("SIGINT", cleanup);
+  process.stdin.on("close", cleanup);
 
   log("Droid ACP Agent ready, waiting for connections...");
 }

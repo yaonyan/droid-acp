@@ -15,6 +15,7 @@ export interface DroidAdapter {
   onNotification(handler: (notification: DroidNotification) => void): void;
   onRawEvent(handler: (event: unknown) => void): void;
   onRequest(handler: (method: string, params: any) => Promise<any>): void;
+  onExit(handler: (code: number | null) => void): void;
   stop(): Promise<void>;
   isRunning(): boolean;
 }
@@ -59,6 +60,7 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
   const machineId = randomUUID();
   const notificationHandlers: Array<(n: DroidNotification) => void> = [];
   const rawEventHandlers: Array<(e: unknown) => void> = [];
+  const exitHandlers: Array<(code: number | null) => void> = [];
   let requestHandler: ((method: string, params: any) => Promise<any>) | null = null;
   let initResolve: ((result: DroidInitResult) => void) | null = null;
   let initReject: ((error: Error) => void) | null = null;
@@ -267,6 +269,8 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
       process.on("exit", (code) => {
         log("Droid exit:", code);
         process = null;
+        // Notify exit handlers for cleanup
+        exitHandlers.forEach(h => h(code));
       });
 
       return new Promise((resolve, reject) => {
@@ -306,6 +310,10 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
 
     onRequest(handler) {
       requestHandler = handler;
+    },
+
+    onExit(handler) {
+      exitHandlers.push(handler);
     },
 
     async stop() {

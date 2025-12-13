@@ -16,6 +16,8 @@ import {
 import { createDroidAdapter, type DroidAdapter, type DroidInitResult, type DroidNotification } from "./droid-adapter.js";
 import { log, generateId } from "./utils.js";
 import { ACP_TO_DROID_MODE, type AutonomyLevel } from "./types.js";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 interface Session {
   id: string;
   droid: DroidAdapter;
@@ -27,6 +29,8 @@ interface Session {
   activeToolCallIds: Set<string>;
   toolCallStatus: Map<string, "pending" | "in_progress" | "completed">;
   toolNames: Map<string, string>;
+  mcpConfigPath: string | null; // Path to MCP config file (for cleanup)
+  mcpServerKeys: string[]; // Server keys to remove during cleanup
 }
 
 /**
@@ -79,6 +83,56 @@ export class DroidAcpAgent implements Agent {
     const cwd = request.cwd || process.cwd();
     log("newSession:", cwd);
 
+    // Write MCP config file if mcpServers provided
+    // Add session ID suffix to server names to avoid conflicts with concurrent sessions
+    let mcpConfigPath: string | null = null;
+    const mcpServerKeys: string[] = []; // Track keys for cleanup
+    if (request.mcpServers && request.mcpServers.length > 0) {
+      const configDir = path.join(cwd, ".factory");
+      mcpConfigPath = path.join(configDir, "mcp.json");
+      
+      // Read existing config or create new one
+      let existingConfig: { mcpServers?: Record<string, unknown> } = {};
+      try {
+        const content = await fs.readFile(mcpConfigPath, "utf-8");
+        existingConfig = JSON.parse(content);
+      } catch {
+        // File doesn't exist, use empty config
+      }
+      
+      // Convert ACP mcpServers to Droid format with unique keys
+      const mcpConfig: Record<string, Record<string, unknown>> = existingConfig.mcpServers as Record<string, Record<string, unknown>> || {};
+      for (const server of request.mcpServers) {
+        // Cast to any to access properties - ACP SDK uses discriminated unions
+        const s = server as any;
+        const uniqueKey = `${server.name}-${sessionId}`;
+        mcpServerKeys.push(uniqueKey);
+        
+        // Infer type from fields: command -> stdio, url -> http
+        // ACP SDK may not always include explicit type field
+        if (s.command) {
+          mcpConfig[uniqueKey] = {
+            type: "stdio",
+            command: s.command,
+            ...(s.args && { args: s.args }),
+            ...(s.env && Object.keys(s.env).length > 0 && { env: s.env }),
+            disabled: false,
+          };
+        } else if (s.url) {
+          mcpConfig[uniqueKey] = {
+            type: "http",
+            url: s.url,
+            ...(s.headers && { headers: s.headers }),
+            disabled: false,
+          };
+        }
+      }
+      
+      await fs.mkdir(configDir, { recursive: true });
+      await fs.writeFile(mcpConfigPath, JSON.stringify({ mcpServers: mcpConfig }, null, 2));
+      log("Wrote MCP config:", mcpConfigPath, mcpServerKeys);
+    }
+
     const droid = createDroidAdapter({ cwd });
     const initResult: DroidInitResult = await droid.start();
 
@@ -93,6 +147,8 @@ export class DroidAcpAgent implements Agent {
       activeToolCallIds: new Set(),
       toolCallStatus: new Map(),
       toolNames: new Map(),
+      mcpConfigPath,
+      mcpServerKeys,
     };
 
     // Set up notification handler
@@ -120,6 +176,13 @@ export class DroidAcpAgent implements Agent {
             return this.handlePermission(session, params);
         }
         throw new Error("Method not supported");
+    });
+
+    // Handle droid process exit - cleanup MCP config
+    droid.onExit(async () => {
+      log("Droid exited, cleaning up session:", session.id);
+      await this.cleanupSessionMcpConfig(session);
+      this.sessions.delete(session.id);
     });
 
     this.sessions.set(sessionId, session);
@@ -183,6 +246,8 @@ export class DroidAcpAgent implements Agent {
         session.promptResolve = null;
       }
       await session.droid.stop();
+      await this.cleanupSessionMcpConfig(session);
+      this.sessions.delete(request.sessionId);
     }
   }
 
@@ -279,49 +344,51 @@ export class DroidAcpAgent implements Agent {
                  session.activeToolCallIds.add(toolCallId);
                  session.toolNames.set(toolCallId, n.toolUse.name);
                  session.toolCallStatus.set(toolCallId, "in_progress"); // Assume started if we see it late without permission req
-                 await this.client.sessionUpdate({
-                    sessionId: session.id,
-                    update: {
-                        sessionUpdate: "tool_call",
-                        toolCallId: toolCallId,
-                        kind: "execute",
-                        title: `Running ${n.toolUse.name}`,
-                        status: "in_progress",
-                    }
-                 });
+                  await this.client.sessionUpdate({
+                     sessionId: session.id,
+                     update: {
+                         sessionUpdate: "tool_call",
+                         toolCallId: toolCallId,
+                         kind: "execute",
+                         title: `Running ${n.toolUse.name}`,
+                         status: "in_progress",
+                     }
+                  });
              } else {
                  // Update status to in_progress if it was pending
                  const status = session.toolCallStatus.get(toolCallId);
                  if (status !== "completed") {
                      session.toolCallStatus.set(toolCallId, "in_progress");
-                     await this.client.sessionUpdate({
-                        sessionId: session.id,
-                        update: {
-                            sessionUpdate: "tool_call_update",
-                            toolCallId: toolCallId,
-                            status: "in_progress",
-                        }
-                     });
+                      await this.client.sessionUpdate({
+                         sessionId: session.id,
+                         update: {
+                             sessionUpdate: "tool_call_update",
+                             toolCallId: toolCallId,
+                             status: "in_progress",
+                         }
+                      });
                  }
              }
           }
 
           // Handle text content
           if (n.text) {
-             await this.client.sessionUpdate({
-               sessionId: session.id,
-               update: {
-                 sessionUpdate: "agent_message_chunk",
-                 content: { type: "text", text: n.text },
-               },
-             });
+              await this.client.sessionUpdate({
+                sessionId: session.id,
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: { type: "text", text: n.text },
+                },
+              });
           }
         }
         break;
 
       case "tool_result":
         // First, send the tool response content
-        // TODO: This might be a temporary fix. 
+        // TODO: This might be a temporary fix.
+        // First, send the tool response content
+        // TODO: This might be a temporary fix.
         await this.client.sessionUpdate({
             sessionId: session.id,
             update: {
@@ -375,6 +442,7 @@ export class DroidAcpAgent implements Agent {
 
       case "complete":
         // Resolve the prompt when complete
+        // Since emit() now awaits handlers, all sessionUpdate calls have completed
         if (session.promptResolve) {
           session.promptResolve({ stopReason: "end_turn" });
           session.promptResolve = null;
@@ -386,7 +454,49 @@ export class DroidAcpAgent implements Agent {
   async cleanup() {
     for (const [, session] of this.sessions) {
       await session.droid.stop();
+      await this.cleanupSessionMcpConfig(session);
     }
     this.sessions.clear();
+  }
+
+  /**
+   * Clean up MCP config entries created for this session
+   * Only removes this session's server keys, preserving other sessions' configs
+   */
+  private async cleanupSessionMcpConfig(session: Session): Promise<void> {
+    if (session.mcpConfigPath && session.mcpServerKeys.length > 0) {
+      try {
+        // Read existing config
+        const content = await fs.readFile(session.mcpConfigPath, "utf-8");
+        const config = JSON.parse(content) as { mcpServers?: Record<string, unknown> };
+        
+        if (config.mcpServers) {
+          // Remove only this session's keys
+          for (const key of session.mcpServerKeys) {
+            delete config.mcpServers[key];
+          }
+          log("Cleaned up MCP config keys:", session.mcpServerKeys);
+          
+          // Write back or delete if empty
+          if (Object.keys(config.mcpServers).length === 0) {
+            await fs.unlink(session.mcpConfigPath);
+            log("Removed empty MCP config:", session.mcpConfigPath);
+            
+            // Try to remove .factory dir if empty
+            const configDir = path.dirname(session.mcpConfigPath);
+            const files = await fs.readdir(configDir);
+            if (files.length === 0) {
+              await fs.rmdir(configDir);
+              log("Removed empty .factory dir:", configDir);
+            }
+          } else {
+            await fs.writeFile(session.mcpConfigPath, JSON.stringify(config, null, 2));
+          }
+        }
+      } catch (err) {
+        // Ignore errors (file may not exist)
+        log("MCP config cleanup error (ignored):", (err as Error).message);
+      }
+    }
   }
 }
