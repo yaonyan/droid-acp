@@ -62,6 +62,10 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
   let requestHandler: ((method: string, params: any) => Promise<any>) | null = null;
   let initResolve: ((result: DroidInitResult) => void) | null = null;
   let initReject: ((error: Error) => void) | null = null;
+  
+  // State for message ordering
+  let isStreamingAssistant = false;
+  let pendingIdle = false;
 
   const send = (method: string, params: Record<string, unknown>) => {
     if (!process?.stdin?.writable) return;
@@ -77,8 +81,17 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
     log("Sent:", method);
   };
 
-  const emit = (n: DroidNotification) => {
-    notificationHandlers.forEach((h) => h(n));
+  const emit = async (n: DroidNotification) => {
+    for (const h of notificationHandlers) {
+      await h(n);
+    }
+  };
+
+  // Process queue sequentially using promise chain
+  let processingChain: Promise<void> = Promise.resolve();
+
+  const queueLine = (line: string) => {
+    processingChain = processingChain.then(() => handleLine(line));
   };
 
   const handleLine = async (line: string) => {
@@ -117,9 +130,20 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
 
         switch (n.type) {
           case "droid_working_state_changed":
-            emit({ type: "working_state", state: n.newState });
-            if (n.newState === "idle") {
-              emit({ type: "complete" });
+            await emit({ type: "working_state", state: n.newState });
+            
+            if (n.newState === "streaming_assistant_message") {
+              isStreamingAssistant = true;
+              pendingIdle = false;
+            } else if (n.newState === "idle") {
+              // See docs/droid-quirks.md "Out-of-Order 'Idle' Notification"
+              // Droid CLI (0.36.2) sometimes sends idle before the final assistant message
+              if (isStreamingAssistant) {
+                // Defer complete event until we get the actual message
+                pendingIdle = true;
+              } else {
+                await emit({ type: "complete" });
+              }
             }
             break;
 
@@ -129,19 +153,28 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
                 const toolUseContent = n.message.content?.find((c: any) => c.type === "tool_use");
 
                 if (textContent || toolUseContent) {
-                    emit({
+                    await emit({
                         type: "message",
                         role: n.message.role,
                         text: textContent?.text,
                         id: n.message.id,
                         toolUse: toolUseContent,
                     });
+                    
+                    // If we were waiting for this assistant message, now complete
+                    if (n.message.role === "assistant") {
+                      isStreamingAssistant = false;
+                      if (pendingIdle) {
+                        await emit({ type: "complete" });
+                        pendingIdle = false;
+                      }
+                    }
                 }
             }
             break;
 
           case "tool_result":
-            emit({
+            await emit({
                 type: "tool_result",
                 toolUseId: n.toolUseId,
                 content: n.content
@@ -149,7 +182,9 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
             break;
 
           case "error":
-            emit({ type: "error", message: n.message });
+            isStreamingAssistant = false;
+            pendingIdle = false;
+            await emit({ type: "error", message: n.message });
             break;
         }
       }
@@ -220,7 +255,7 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
       });
 
       if (process.stdout) {
-        createInterface({ input: process.stdout }).on("line", handleLine);
+        createInterface({ input: process.stdout }).on("line", queueLine);
       }
       if (process.stderr) {
         createInterface({ input: process.stderr }).on("line", (l) => log("[droid]", l));
