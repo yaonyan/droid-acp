@@ -277,13 +277,14 @@ export function createDroidAdapter(options: DroidAdapterOptions): DroidAdapter {
         initResolve = resolve;
         initReject = reject;
         send("droid.initialize_session", { machineId, cwd: options.cwd });
+        const initTimeout = parseInt(globalThis.process.env.DROID_INIT_TIMEOUT || "60000", 10);
         setTimeout(() => {
           if (initReject) {
             initReject(new Error("Droid init timeout"));
             initResolve = null;
             initReject = null;
           }
-        }, 30000);
+        }, initTimeout);
       });
     },
 
