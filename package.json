@@ -1,7 +1,7 @@
 {
   "name": "@yaonyan/droid-acp",
   "type": "module",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "ACP Agent adapter for Factory Droid CLI",
   "repository": {
     "type": "git",
