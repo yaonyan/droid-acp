@@ -6,6 +6,8 @@ ACP (Agent Client Protocol) adapter for [Factory Droid CLI](https://docs.factory
 
 This agent bridges the ACP protocol with Factory Droid, allowing ACP clients (like Zed Editor) to use Droid as their AI coding backend.
 
+> **Note**: This is a community implementation using Droid's `stream-jsonrpc` mode. We still look forward to an official ACP implementation from Factory.
+
 ## Installation
 
 ```bash
@@ -32,15 +34,18 @@ export FACTORY_API_KEY=fk-...
 
 ### With Zed Editor
 
-Add to your Zed settings:
+Add to your Zed settings (`settings.json`):
 
-```json
+```jsonc
 {
-  "agents": {
-    "droid": {
-      "command": "droid-acp",
+  "agent-servers": {
+    "droid-acp": {
+      "type": "custom",
+      "command": "npx",
+      "args": ["@yaonyan/droid-acp"],
       "env": {
-        "FACTORY_API_KEY": "fk-..."
+        "FACTORY_API_KEY": "fk-xxx"
+        // "DROID_DEBUG": "1"
       }
     }
   }
@@ -91,6 +96,10 @@ pnpm typecheck
 # Test
 pnpm test
 ```
+
+## MCP Server Support (Workaround)
+
+Droid CLI doesn't support passing MCP servers via command-line. As a workaround, the adapter writes `mcpServers` from `session/new` to `.factory/mcp.json` with unique keys (`{name}-{sessionId}`), then cleans up on session end.
 
 ## License
 
