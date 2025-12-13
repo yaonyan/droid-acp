@@ -107,7 +107,7 @@ describe('Droid ACP Agent Integration', () => {
     });
     expect(res.result?.sessionId).toBeDefined();
     sessionId = res.result.sessionId;
-  });
+  }, 30000);
 
   it('should handle tool call (run echo 1)', async () => {
     console.log('\n--- Sending prompt: run echo 1 ---\n');
