@@ -58,7 +58,7 @@ node dist/index.mjs
 
 ## Features
 
-el support**: Claude Opus/Sonnet/Haiku, GPT-5.1, Gemini 3 Pro
+- **Full model support**: Claude Opus/Sonnet/Haiku, GPT-5.1, Gemini 3 Pro
 - **Autonomy levels**: Low (read-only), Medium (dev ops), High (production ops)
 - **Session management**: Persistent sessions with conversation history
 - **Tool execution**: File operations, command execution, code search
