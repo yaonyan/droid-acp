@@ -6,6 +6,7 @@ ACP (Agent Client Protocol) adapter for [Factory Droid CLI](https://docs.factory
 
 This agent bridges the ACP protocol with Factory Droid, allowing ACP clients (like Zed Editor) to use Droid as their AI coding backend.
 
+> **Good News**: ACP is now officially supported in Droid; go use it https://docs.factory.ai/changelog/cli-updates#new-features!
 > **Note**: This is a community implementation using Droid's `stream-jsonrpc` mode. We still look forward to an official ACP implementation from Factory.
 
 ## Installation
